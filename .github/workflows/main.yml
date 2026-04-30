@@ -1,88 +1,122 @@
-name: دانلود فایل دلخواه شما با نت ملی
-
-on:
-  workflow_dispatch:
-    inputs:
-      file_url:
-        description: 'لینک مستقیم فایل مورد نظر'
-        required: true
-        type: string
-      zip_password:
-        description: 'رمز عبور برای فایل ZIP'
-        required: true
-        type: string
-
-permissions:
-  contents: write
-
-jobs:
-  download-and-split:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: دریافت کد مخزن
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
-      - name: نصب 7z
-        run: sudo apt-get update && sudo apt-get install -y p7zip-full
-
-      - name: دانلود فایل از لینک
+      - name: دانلود و پردازش (سرعت بالا)
         run: |
-          curl -L --fail --retry 3 -o downloaded_file "${{ github.event.inputs.file_url }}"
-          ls -lh downloaded_file
-
-      - name: استخراج نام اصلی فایل (اختیاری)
-        run: |
-          ORIGINAL_NAME=$(basename "${{ github.event.inputs.file_url }}" | cut -d '?' -f1)
-          [ -z "$ORIGINAL_NAME" ] && ORIGINAL_NAME="downloaded_file"
-          echo "ORIGINAL_NAME=$ORIGINAL_NAME" >> $GITHUB_ENV
-
-      - name: ساخت آرشیو رمزدار چندتکه (هر تکه ۹۵ مگابایت)
-        run: |
-          7z a -p"${{ github.event.inputs.zip_password }}" -mhe=on -mx=3 -v95m "archive.7z" downloaded_file
-
-      - name: حذف فایل اصلی
-        run: rm -f downloaded_file
-
-      - name: Commit و Push مرحله‌ای تکه‌ها (هر بار ۱۰ تکه)
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          DELIMITER="${{ github.event.inputs.delimiter }}"
+          IFS="$DELIMITER" read -ra urls <<< "${{ github.event.inputs.file_urls }}"
           
-          # لیست تمام تکه‌ها
-          chunks=(archive.7z.*)
-          total=${#chunks[@]}
-          batch_size=10  # هر بار ۱۰ تکه
-          start=0
-          
-          while [ $start -lt $total ]; do
-            end=$((start + batch_size - 1))
-            [ $end -ge $total ] && end=$((total - 1))
-            
-            echo "Pushing chunks $start to $end ..."
-            
-            # افزودن تکه‌های این بسته
-            for i in $(seq $start $end); do
-              git add "${chunks[$i]}"
-            done
-            
-            # commit (با پیام حاوی محدوده)
-            git commit -m "Add chunks $((start+1))-$((end+1)) of $total"
-            
-            # push با حداکثر تلاش ۵ بار
-            for attempt in {1..5}; do
-              if git push; then
-                echo "Push successful"
-                break
-              else
-                echo "Push failed (attempt $attempt), retrying in 10 seconds..."
-                sleep 10
-              fi
-            done
-            
-            start=$((end + 1))
-            # کمی صبر بین بسته‌ها
-            sleep 5
+          clean_urls=()
+          for url in "${urls[@]}"; do
+            url=$(echo "$url" | xargs)
+            [ -n "$url" ] && clean_urls+=("$url")
           done
+          
+          total_urls=${#clean_urls[@]}
+          echo "📊 تعداد لینک: $total_urls"
+          
+          success=0
+          fail=0
+          total_bytes=0
+          
+          echo "🚀 شروع دانلود موازی $total_urls فایل..."
+          
+          # فعال کردن job control
+          set -m
+          
+          for i in "${!clean_urls[@]}"; do
+            url="${clean_urls[$i]}"
+            current=$((i + 1))
+            
+            RAW_FILENAME=$(echo "$url" | grep -oP '[^/]+\.(mp4|mkv|avi|mov|webm|flv|mp3|m4a|jpg|png|gif|pdf|zip|rar|7z)(\?.*)?$' | cut -d '?' -f1)
+            
+            if [ -z "$RAW_FILENAME" ]; then
+              RAW_FILENAME=$(basename "$url" | cut -d '?' -f1 | python3 -c "import sys, urllib.parse; print(urllib.parse.unquote(sys.stdin.read().strip()))" 2>/dev/null || basename "$url" | cut -d '?' -f1)
+            fi
+            
+            FILENAME=$(echo "$RAW_FILENAME" | sed 's/[^a-zA-Z0-9._-]/_/g')
+            
+            if [ -z "$FILENAME" ] || [ ${#FILENAME} -lt 3 ] || [ ${#FILENAME} -gt 80 ]; then
+              FILENAME=$(printf "file_%02d" $current)
+            fi
+            
+            echo "📥 [$current/$total_urls] $FILENAME"
+            
+            # دانلود در پس‌زمینه
+            (
+              curl -L --fail --retry 3 --retry-delay 3 \
+                   --connect-timeout 20 --max-time 600 \
+                   -o "${{ env.MAIN_FOLDER }}/${FILENAME}" \
+                   "$url" 2>/dev/null
+            ) &
+          done
+          
+          # صبر برای همه پروسه‌های پس‌زمینه (بدون timeout)
+          echo "⏳ منتظر اتمام دانلودها..."
+          wait
+          echo "✅ همه دانلودها تموم شد!"
+          
+          # ====== مرحله ۲: بررسی و فشرده‌سازی ======
+          cd "${{ env.MAIN_FOLDER }}"
+          
+          # ببینیم چی دانلود شده
+          echo "📂 محتویات پوشه:"
+          ls -lh
+          
+          # لیست فایل‌های دانلود شده
+          downloaded_files=($(ls -1))
+          
+          file_index=0
+          for FILENAME in "${downloaded_files[@]}"; do
+            file_index=$((file_index + 1))
+            
+            FILE_SIZE=$(stat -c%s "$FILENAME" 2>/dev/null || echo 0)
+            
+            if [ "$FILE_SIZE" = "0" ]; then
+              echo "❌ $FILENAME حجم صفر - رد شد"
+              rm -f "$FILENAME"
+              fail=$((fail + 1))
+              continue
+            fi
+            
+            echo "✅ $FILENAME ($(numfmt --to=iec $FILE_SIZE))"
+            total_bytes=$((total_bytes + FILE_SIZE))
+            
+            MIME=$(file --mime-type -b "$FILENAME" 2>/dev/null)
+            
+            case "$MIME" in
+              video/mp4)             EXT=".mp4" ;;
+              video/x-matroska)      EXT=".mkv" ;;
+              video/webm)            EXT=".webm" ;;
+              video/x-msvideo)       EXT=".avi" ;;
+              video/quicktime)       EXT=".mov" ;;
+              audio/mpeg)            EXT=".mp3" ;;
+              audio/mp4)             EXT=".m4a" ;;
+              image/jpeg)            EXT=".jpg" ;;
+              image/png)             EXT=".png" ;;
+              application/pdf)       EXT=".pdf" ;;
+              application/zip)       EXT=".zip" ;;
+            esac
+            
+            if [ -n "$EXT" ] && [[ ! "$FILENAME" =~ \.[a-zA-Z0-9]+$ ]]; then
+              mv "$FILENAME" "${FILENAME}${EXT}"
+              FILENAME="${FILENAME}${EXT}"
+            fi
+            
+            ARCHIVE_NAME=$(printf "file_%02d" $file_index)
+            
+            if 7z a -p"${{ github.event.inputs.zip_password }}" -mhe=on -mx=0 -v95m \
+                 "${ARCHIVE_NAME}.7z" "$FILENAME" > /dev/null 2>&1; then
+              echo "  🗜️ ${ARCHIVE_NAME}.7z.xxx (حاوی: $FILENAME)"
+              rm -f "$FILENAME"
+              success=$((success + 1))
+            else
+              echo "  ❌ خطای فشرده‌سازی"
+              fail=$((fail + 1))
+            fi
+          done
+          
+          cd - > /dev/null
+          
+          echo ""
+          echo "═════════════════════════════════════════════"
+          echo "📊 نهایی: کل=$total_urls | ✅$success | ❌$fail"
+          echo "📊 مجموع حجم: $(numfmt --to=iec $total_bytes)"
+          echo "═════════════════════════════════════════════"
