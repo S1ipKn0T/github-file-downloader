@@ -1,0 +1,44 @@
+name: محاسبه حجم واقعی
+
+on:
+  workflow_dispatch:
+
+jobs:
+  calculate-real-size:
+    runs-on: ubuntu-latest
+    steps:
+      - name: محاسبه حجم
+        run: |
+          echo "📊 در حال محاسبه حجم..."
+          
+          # تابع دریافت مجموع حجم‌ها
+          get_total_size() {
+            local path="$1"
+            local sum=0
+            local content=$(curl -s "https://api.github.com/repos/${{ github.repository }}/contents/$path?ref=main")
+            
+            # اگر پاسخ آرایه باشه (پوشه است)، محتویاتش رو بررسی کن
+            if echo "$content" | jq -e 'type == "array"' > /dev/null 2>&1; then
+              echo "$content" | jq -c '.[]' | while IFS= read -r item; do
+                sub_path=$(echo "$item" | jq -r '.path')
+                item_type=$(echo "$item" | jq -r '.type')
+                item_size=$(echo "$item" | jq -r '.size // 0')
+                
+                if [ "$item_type" = "dir" ]; then
+                  get_total_size "$sub_path"
+                else
+                  echo "$item_size"
+                fi
+              done
+            fi
+          }
+          
+          # اجرا و جمع زدن
+          TOTAL=0
+          while IFS= read -r size; do
+            TOTAL=$((TOTAL + size))
+          done < <(get_total_size "downloads")
+          
+          TOTAL_HUMAN=$(numfmt --to=iec --suffix=B $TOTAL)
+          echo "----------------------------------------"
+          echo "📊 مجموع حجم کل فایل‌ها: $TOTAL_HUMAN ($TOTAL bytes)"

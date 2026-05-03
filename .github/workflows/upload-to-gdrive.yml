@@ -1,0 +1,108 @@
+name: آپلود هوشمند، مرتب و تضمینی
+
+on:
+  workflow_dispatch:
+    inputs:
+      folder_name:
+        description: 'نام پوشه'
+        required: true
+      group_number:
+        description: 'شماره گروه ۱۴ گیگابایتی'
+        required: true
+        default: '1'
+
+jobs:
+  transfer:
+    runs-on: ubuntu-latest
+    steps:
+      - name: نصب Rclone، jq و parallel
+        run: |
+          curl https://rclone.org/install.sh | sudo bash
+          sudo apt-get update && sudo apt-get install -y jq parallel
+
+      - name: تنظیم کانفیگ Rclone
+        run: |
+          mkdir -p ~/.config/rclone/
+          echo "${{ secrets.RCLONE_CONFIG_BASE64 }}" | base64 -d > ~/.config/rclone/rclone.conf
+
+      - name: گروه‌بندی مرتب و آپلود
+        run: |
+          FOLDER="${{ github.event.inputs.folder_name }}"
+          GROUP_NUM="${{ github.event.inputs.group_number }}"
+          MAX_SIZE=$((14 * 1024 * 1024 * 1024))
+          WORK_DIR="download_temp"
+          TAR_FILE="${FOLDER}_group_${GROUP_NUM}.tar"
+          
+          mkdir -p "$WORK_DIR/$FOLDER"
+          
+          echo "📋 دریافت لیست فایل‌ها..."
+          FILES=$(curl -s "https://api.github.com/repos/S1ipKn0T/github-file-downloader/contents/downloads/$FOLDER?ref=main")
+
+          # --- گروه‌بندی خانواده‌ها ---
+          echo "🧠 گروه‌بندی فایل‌ها بر اساس خانواده (base name)..."
+          
+          declare -A FAMILIES
+          declare -A FAMILY_SIZE
+          
+          while IFS= read -r line; do
+            URL=$(echo "$line" | awk '{print $1}')
+            NAME=$(echo "$line" | awk '{print $2}')
+            SIZE=$(echo "$line" | awk '{print $3}')
+            
+            BASE_NAME=$(echo "$NAME" | sed 's/\(.*\)\.7z\..*/\1/')
+            FAMILIES["$BASE_NAME"]+="$URL $NAME"$'\n'
+            FAMILY_SIZE["$BASE_NAME"]=$(( ${FAMILY_SIZE["$BASE_NAME"]} + SIZE ))
+          done < <(echo "$FILES" | jq -r '.[] | "\(.download_url) \(.name) \(.size)"')
+
+          # *** بخش جدید: مرتب‌سازی خانواده‌ها ***
+          echo "📑 مرتب‌سازی خانواده‌ها بر اساس شماره..."
+          SORTED_BASES=$(for base in "${!FAMILY_SIZE[@]}"; do echo "$base"; done | sort -t '_' -k2 -n)
+          # -t '_': جداکننده "_" است (مثلاً file_01)
+          # -k2 -n: مرتب‌سازی بر اساس قسمت دوم (عدد) به صورت عددی
+
+          CURRENT_SIZE=0
+          CURRENT_GROUP=1
+          > "group_${GROUP_NUM}.txt"
+          
+          for BASE in $SORTED_BASES; do
+            FSIZE=${FAMILY_SIZE["$BASE"]}
+            
+            if [ $((CURRENT_SIZE + FSIZE)) -gt $MAX_SIZE ] && [ $CURRENT_SIZE -gt 0 ]; then
+              CURRENT_GROUP=$((CURRENT_GROUP + 1))
+              CURRENT_SIZE=0
+            fi
+            
+            if [ $CURRENT_GROUP -eq $GROUP_NUM ]; then
+              echo "${FAMILIES[$BASE]}" >> "group_${GROUP_NUM}.txt"
+            fi
+            
+            CURRENT_SIZE=$((CURRENT_SIZE + FSIZE))
+          done
+
+          sed -i '/^$/d' "group_${GROUP_NUM}.txt"
+
+          if [ ! -s "group_${GROUP_NUM}.txt" ]; then
+            echo "❌ گروه شماره $GROUP_NUM خالی است."
+            exit 1
+          fi
+
+          # دانلود و ادامه...
+          echo "⚡ دانلود فایل‌های گروه $GROUP_NUM (مرتب)..."
+          cat "group_${GROUP_NUM}.txt" | parallel --colsep ' ' -j 8 'curl -s -L -o "'$WORK_DIR'/'$FOLDER'/{2}" {1} && echo "✅ {2}"'
+          
+          echo "📦 ساخت فایل TAR..."
+          cd "$WORK_DIR"
+          tar -cf "../$TAR_FILE" "$FOLDER"
+          cd ..
+          
+          echo "📊 حجم فایل: $(du -h $TAR_FILE | cut -f1)"
+          
+          echo "🚀 آپلود به گوگل درایو..."
+          rclone copy "$TAR_FILE" "gdrive:/test_downloads/${FOLDER}/" --progress --verbose --transfers 8 --buffer-size 128M
+          
+          if [ $? -eq 0 ]; then
+            echo "🎉 گروه $GROUP_NUM آپلود شد."
+          else
+            echo "❌ خطا در آپلود."
+            exit 1
+          fi

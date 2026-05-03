@@ -1,0 +1,80 @@
+name: پاکسازی تاریخچه با API (نسخه ۲)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  purge-history:
+    runs-on: ubuntu-latest
+    steps:
+      - name: پاکسازی تاریخچه
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "🧪 دریافت اطلاعات شاخه main..."
+          
+          MAIN_SHA=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/git/ref/heads/main" | jq -r '.object.sha')
+          
+          echo "SHA اصلی: $MAIN_SHA"
+          
+          TREE_SHA=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/git/commits/$MAIN_SHA" | jq -r '.tree.sha')
+          
+          echo "درخت اصلی: $TREE_SHA"
+          
+          # دریافت لیست کامل فایل‌ها
+          TREE_CONTENT=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/git/trees/$TREE_SHA?recursive=1")
+          
+          # حذف همه چیز در downloads/
+          FILTERED_TREE=$(echo "$TREE_CONTENT" | jq '[ .tree[] | select(.path | startswith("downloads/") | not) ]')
+          
+          echo "تعداد فایل‌های باقی‌مانده: $(echo "$FILTERED_TREE" | jq 'length')"
+          
+          # *** روش جدید: ساختن tree از صفر با آیتم‌های فیلترشده ***
+          echo "🌱 ساخت درخت جدید..."
+          
+          # ساختن JSON برای tree جدید
+          NEW_TREE_ITEMS=$(echo "$FILTERED_TREE" | jq '[.[] | {path: .path, mode: .mode, type: .type, sha: .sha}]')
+          
+          NEW_TREE_RESPONSE=$(curl -s -X POST -H "Authorization: token $GITHUB_TOKEN" \
+            -d "{\"tree\":$NEW_TREE_ITEMS}" \
+            "https://api.github.com/repos/${{ github.repository }}/git/trees")
+          
+          NEW_TREE_SHA=$(echo "$NEW_TREE_RESPONSE" | jq -r '.sha')
+          
+          if [ "$NEW_TREE_SHA" = "null" ] || [ -z "$NEW_TREE_SHA" ]; then
+            echo "❌ خطا در ساخت درخت."
+            echo "پاسخ: $NEW_TREE_RESPONSE"
+            exit 1
+          fi
+          
+          echo "✅ درخت جدید: $NEW_TREE_SHA"
+          
+          # ساختن commit با parents خالی (orphan)
+          OLD_MESSAGE=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/git/commits/$MAIN_SHA" | jq -r '.message')
+          
+          echo "📝 ساخت commit یتیم..."
+          NEW_COMMIT_RESPONSE=$(curl -s -X POST -H "Authorization: token $GITHUB_TOKEN" \
+            -d "{\"message\":\"$OLD_MESSAGE\",\"tree\":\"$NEW_TREE_SHA\",\"parents\":[]}" \
+            "https://api.github.com/repos/${{ github.repository }}/git/commits")
+          
+          NEW_COMMIT_SHA=$(echo "$NEW_COMMIT_RESPONSE" | jq -r '.sha')
+          
+          if [ "$NEW_COMMIT_SHA" = "null" ] || [ -z "$NEW_COMMIT_SHA" ]; then
+            echo "❌ خطا در ساخت commit."
+            echo "پاسخ: $NEW_COMMIT_RESPONSE"
+            exit 1
+          fi
+          
+          echo "✅ Commit جدید: $NEW_COMMIT_SHA"
+          
+          # جایگزینی شاخه main
+          echo "🚀 جایگزینی شاخه main..."
+          curl -s -X PATCH -H "Authorization: token $GITHUB_TOKEN" \
+            -d "{\"sha\":\"$NEW_COMMIT_SHA\",\"force\":true}" \
+            "https://api.github.com/repos/${{ github.repository }}/git/refs/heads/main"
+          
+          echo "🎉 تاریخچه برای همیشه پاک شد!"

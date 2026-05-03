@@ -1,0 +1,92 @@
+name: دانلود و Push (نسخه بهینه Git)
+
+on:
+  workflow_dispatch:
+    inputs:
+      file_urls:
+        description: 'لینک‌ها با جداکننده ;'
+        required: true
+        type: string
+      zip_password:
+        description: 'رمز عبور فایل‌های ZIP'
+        required: true
+        type: string
+      custom_folder:
+        description: 'نام پوشه (اختیاری)'
+        required: false
+        type: string
+        default: ''
+      delimiter:
+        description: 'جداکننده (پیش‌فرض: ;)'
+        required: false
+        type: string
+        default: ';'
+
+permissions:
+  contents: write
+
+jobs:
+  download-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: نصب پیش‌نیازها
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq p7zip-full
+
+      - name: ایجاد پوشه
+        run: |
+          if [ -n "${{ github.event.inputs.custom_folder }}" ]; then
+            MAIN_FOLDER="downloads/${{ github.event.inputs.custom_folder }}"
+          else
+            TIMESTAMP=$(date +'%Y%m%d_%H%M%S')
+            MAIN_FOLDER="downloads/batch_${TIMESTAMP}_${{ github.run_number }}"
+          fi
+          mkdir -p "$MAIN_FOLDER"
+          echo "MAIN_FOLDER=$MAIN_FOLDER" >> $GITHUB_ENV
+          echo "📁 پوشه: $MAIN_FOLDER"
+
+      - name: دانلود و پردازش (سریع)
+        run: |
+          IFS="${{ github.event.inputs.delimiter }}" read -ra urls <<< "${{ github.event.inputs.file_urls }}"
+          success=0; fail=0; file_index=0
+          
+          for url in "${urls[@]}"; do
+            url=$(echo "$url" | xargs); [ -z "$url" ] && continue
+            file_index=$((file_index + 1))
+            
+            echo "📥 [$file_index] دانلود..."
+            ARCHIVE_NAME=$(printf "file_%02d" $file_index)
+            
+            curl -L --fail --retry 3 --retry-delay 3 \
+                 --connect-timeout 20 --max-time 600 \
+                 -o "${{ env.MAIN_FOLDER }}/temp_dl" \
+                 "$url" 2>/dev/null && \
+            7z a -p"${{ github.event.inputs.zip_password }}" -mhe=on -mx=0 -v40m \
+                 "${{ env.MAIN_FOLDER }}/${ARCHIVE_NAME}.7z" "${{ env.MAIN_FOLDER }}/temp_dl" > /dev/null 2>&1 && \
+            rm -f "${{ env.MAIN_FOLDER }}/temp_dl" && \
+            echo "✅ ${ARCHIVE_NAME}.7z" && success=$((success + 1)) || \
+            { echo "❌ خطا"; fail=$((fail + 1)); }
+          done
+          
+          echo "📊 موفق: $success | ناموفق: $fail"
+          [ "$success" -eq 0 ] && exit 1 || true
+
+      - name: Clone سبک و Push
+        run: |
+          echo "🚀 در حال clone و push..."
+          git clone --depth=1 --filter=blob:none https://x-access-token:${{ github.token }}@github.com/${{ github.repository }} repo-tmp
+          cd repo-tmp
+          
+          mkdir -p "${{ env.MAIN_FOLDER }}"
+          cp ../${{ env.MAIN_FOLDER }}/*.7z.* "${{ env.MAIN_FOLDER }}/"
+          
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "${{ env.MAIN_FOLDER }}/"
+          git commit -m "📦 [${{ env.MAIN_FOLDER }}]"
+          
+          for i in {1..5}; do
+            git pull --rebase origin main && git push origin main && echo "🎉 آپلود تموم شد!" && exit 0
+            echo "⚠️ تلاش $i نشد - ۵ ثانیه صبر"
+            sleep 5
+          done
+          echo "❌ آپلود失败"; exit 1
