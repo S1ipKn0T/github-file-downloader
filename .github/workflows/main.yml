@@ -1,4 +1,4 @@
-name: دانلود و آپلود مطمئن به گوگل درایو
+name: دانلود و آپلود مطمئن به گوگل درایو (۴ اکانته با Fallback)
 
 on:
   workflow_dispatch:
@@ -30,10 +30,23 @@ jobs:
           sudo apt-get update -qq && sudo apt-get install -y -qq curl
           curl https://rclone.org/install.sh | sudo bash
 
-      - name: تنظیم کانفیگ Rclone
+      - name: تنظیم کانفیگ‌های Rclone برای ۴ اکانت
         run: |
           mkdir -p ~/.config/rclone/
-          echo "${{ secrets.RCLONE_CONFIG_BASE64 }}" | base64 -d > ~/.config/rclone/rclone.conf
+          
+          # تنظیم اکانت اول
+          echo "${{ secrets.RCLONE_CONFIG_BASE64 }}" | base64 -d > ~/.config/rclone/rclone1.conf
+          
+          # تنظیم اکانت دوم
+          echo "${{ secrets.RCLONE_CONFIG_BASE64_2 }}" | base64 -d > ~/.config/rclone/rclone2.conf
+          
+          # تنظیم اکانت سوم
+          echo "${{ secrets.RCLONE_CONFIG_BASE64_3 }}" | base64 -d > ~/.config/rclone/rclone3.conf
+          
+          # تنظیم اکانت چهارم
+          echo "${{ secrets.RCLONE_CONFIG_BASE64_4 }}" | base64 -d > ~/.config/rclone/rclone4.conf
+          
+          echo "✅ کانفیگ‌های Rclone برای ۴ اکانت تنظیم شد."
 
       - name: ایجاد پوشه موقت
         run: |
@@ -53,17 +66,57 @@ jobs:
           success=0
           fail=0
           file_index=0
+          drive_counter=0  # شمارنده برای چرخش بین ۴ گوگل درایو
+          
+          # تابع کمکی برای آپلود با قابلیت تلاش روی اکانت‌های مختلف
+          upload_with_fallback() {
+            local FILE_TO_UPLOAD=$1
+            local START_DRIVE=$2
+            
+            # تلاش روی همه ۴ اکانت، از اکانت START_DRIVE شروع می‌کنه
+            for i in $(seq 0 3); do
+              local CURRENT_DRIVE=$(( (START_DRIVE - 1 + i) % 4 + 1 ))
+              
+              echo "🔍 تلاش برای آپلود روی اکانت شماره $CURRENT_DRIVE..."
+              
+              if rclone copy "${{ env.MAIN_FOLDER }}/$FILE_TO_UPLOAD" \
+                "gdrive${CURRENT_DRIVE}:/${{ env.MAIN_FOLDER }}/" \
+                --config="$HOME/.config/rclone/rclone${CURRENT_DRIVE}.conf" \
+                --progress \
+                --transfers 4 \
+                --buffer-size 64M 2>&1; then
+                
+                echo "✅ $FILE_TO_UPLOAD با موفقیت در اکانت $CURRENT_DRIVE آپلود شد!"
+                return 0  # موفقیت
+              else
+                ERROR_CODE=$?
+                echo "⚠️ خطا در آپلود به اکانت $CURRENT_DRIVE (کد خطا: $ERROR_CODE)"
+                
+                # اگر ارور از نوع Quota باشه، پیام مناسب می‌دیم و ادامه می‌دیم
+                # اگر ارور دیگه‌ای باشه (مثل قطعی شبکه)، شاید بهتر باشه باز هم continue نکنیم
+                if [ $CURRENT_DRIVE -ne $(( (START_DRIVE - 1 + 3) % 4 + 1 )) ]; then
+                  echo "🔄 تلاش روی اکانت بعدی..."
+                fi
+              fi
+            done
+            
+            # اگر به اینجا برسیم یعنی هیچکدوم از ۴ اکانت جواب ندادن
+            return 1  # شکست
+          }
           
           for url in "${urls[@]}"; do
             url=$(echo "$url" | xargs)
             [ -z "$url" ] && continue
             file_index=$((file_index + 1))
             
+            # انتخاب گوگل درایو به صورت چرخشی (1 تا 4)
+            drive_counter=$(( (drive_counter % 4) + 1 ))
+            START_DRIVE=$drive_counter
+            
             echo ""
             echo "═════════════════════════════════════════════"
-            echo "📥 [$file_index] پردازش..."
+            echo "📥 [$file_index] پردازش (اکانت پیش‌فرض: $START_DRIVE)..."
             
-            # --- >>> شروع تغییرات <<< ---
             # استخراج نام پوشه والد از URL برای یکتاسازی نام فایل
             FOLDER_NAME=$(echo "$url" | rev | cut -d'/' -f2 | rev)
             
@@ -74,7 +127,6 @@ jobs:
             
             # ترکیب نام پوشه و نام فایل برای ساختن یک نام یکتا
             UNIQUE_FILENAME="${FOLDER_NAME}_${FILENAME}"
-            # --- >>> پایان تغییرات <<< ---
             
             echo "📄 نام فایل: $UNIQUE_FILENAME"
             
@@ -88,19 +140,13 @@ jobs:
               FILE_SIZE=$(stat -c%s "${{ env.MAIN_FOLDER }}/$UNIQUE_FILENAME")
               echo "✅ دانلود موفق: $(numfmt --to=iec $FILE_SIZE)"
               
-              # آپلود مستقیم به گوگل درایو
-              echo "🚀 آپلود به گوگل درایو..."
-              if rclone copy "${{ env.MAIN_FOLDER }}/$UNIQUE_FILENAME" \
-                "gdrive:/${{ env.MAIN_FOLDER }}/" \
-                --progress \
-                --transfers 4 \
-                --buffer-size 64M; then
-                
-                echo "✅ $UNIQUE_FILENAME با موفقیت آپلود شد!"
+              # آپلود با قابلیت Fallback
+              echo "🚀 شروع پروسه آپلود (با قابلیت انتخاب خودکار اکانت جایگزین)..."
+              if upload_with_fallback "$UNIQUE_FILENAME" $START_DRIVE; then
                 rm -f "${{ env.MAIN_FOLDER }}/$UNIQUE_FILENAME"
                 success=$((success + 1))
               else
-                echo "❌ خطا در آپلود $UNIQUE_FILENAME"
+                echo "❌ آپلود $UNIQUE_FILENAME روی هیچکدوم از ۴ اکانت موفق نبود"
                 fail=$((fail + 1))
               fi
             else
@@ -121,4 +167,4 @@ jobs:
             exit 1
           fi
           
-          echo "🎉 تمام فایل‌ها با موفقیت به گوگل درایو منتقل شدند!"
+          echo "🎉 تمام فایل‌ها با موفقیت به گوگل درایوها منتقل شدند!"
