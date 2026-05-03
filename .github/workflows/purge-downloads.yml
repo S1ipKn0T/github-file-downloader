@@ -1,43 +1,40 @@
-name: پاکسازی تاریخچه با API (نسخه ۲)
+name: حذف کامل پوشه downloads و پاکسازی تاریخچه
 
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
-  purge-history:
+  purge-downloads:
     runs-on: ubuntu-latest
     steps:
-      - name: پاکسازی تاریخچه
+      - name: حذف تمام فایل‌های پوشه downloads با API
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "🧪 دریافت اطلاعات شاخه main..."
+          echo "🔍 دریافت ساختار فایل‌ها..."
           
           MAIN_SHA=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
             "https://api.github.com/repos/${{ github.repository }}/git/ref/heads/main" | jq -r '.object.sha')
           
-          echo "SHA اصلی: $MAIN_SHA"
-          
           TREE_SHA=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
             "https://api.github.com/repos/${{ github.repository }}/git/commits/$MAIN_SHA" | jq -r '.tree.sha')
           
-          echo "درخت اصلی: $TREE_SHA"
-          
-          # دریافت لیست کامل فایل‌ها
+          # دریافت لیست فایل‌ها
           TREE_CONTENT=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
             "https://api.github.com/repos/${{ github.repository }}/git/trees/$TREE_SHA?recursive=1")
           
-          # حذف همه چیز در downloads/
+          # فیلتر کردن فایل‌هایی که در downloads/ نیستند
           FILTERED_TREE=$(echo "$TREE_CONTENT" | jq '[ .tree[] | select(.path | startswith("downloads/") | not) ]')
           
           echo "تعداد فایل‌های باقی‌مانده: $(echo "$FILTERED_TREE" | jq 'length')"
           
-          # *** روش جدید: ساختن tree از صفر با آیتم‌های فیلترشده ***
-          echo "🌱 ساخت درخت جدید..."
-          
-          # ساختن JSON برای tree جدید
+          # ساختن tree جدید
           NEW_TREE_ITEMS=$(echo "$FILTERED_TREE" | jq '[.[] | {path: .path, mode: .mode, type: .type, sha: .sha}]')
           
+          echo "🌱 ساخت tree جدید..."
           NEW_TREE_RESPONSE=$(curl -s -X POST -H "Authorization: token $GITHUB_TOKEN" \
             -d "{\"tree\":$NEW_TREE_ITEMS}" \
             "https://api.github.com/repos/${{ github.repository }}/git/trees")
@@ -45,36 +42,31 @@ jobs:
           NEW_TREE_SHA=$(echo "$NEW_TREE_RESPONSE" | jq -r '.sha')
           
           if [ "$NEW_TREE_SHA" = "null" ] || [ -z "$NEW_TREE_SHA" ]; then
-            echo "❌ خطا در ساخت درخت."
-            echo "پاسخ: $NEW_TREE_RESPONSE"
+            echo "❌ خطا: $NEW_TREE_RESPONSE"
             exit 1
           fi
           
-          echo "✅ درخت جدید: $NEW_TREE_SHA"
+          echo "✅ Tree جدید: $NEW_TREE_SHA"
           
-          # ساختن commit با parents خالی (orphan)
-          OLD_MESSAGE=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
-            "https://api.github.com/repos/${{ github.repository }}/git/commits/$MAIN_SHA" | jq -r '.message')
-          
-          echo "📝 ساخت commit یتیم..."
+          # ساختن commit با parent (نه یتیم)
+          echo "📝 ساخت commit..."
           NEW_COMMIT_RESPONSE=$(curl -s -X POST -H "Authorization: token $GITHUB_TOKEN" \
-            -d "{\"message\":\"$OLD_MESSAGE\",\"tree\":\"$NEW_TREE_SHA\",\"parents\":[]}" \
+            -d "{\"message\":\"🗑️ حذف کامل پوشه downloads\",\"tree\":\"$NEW_TREE_SHA\",\"parents\":[\"$MAIN_SHA\"]}" \
             "https://api.github.com/repos/${{ github.repository }}/git/commits")
           
           NEW_COMMIT_SHA=$(echo "$NEW_COMMIT_RESPONSE" | jq -r '.sha')
           
           if [ "$NEW_COMMIT_SHA" = "null" ] || [ -z "$NEW_COMMIT_SHA" ]; then
-            echo "❌ خطا در ساخت commit."
-            echo "پاسخ: $NEW_COMMIT_RESPONSE"
+            echo "❌ خطا: $NEW_COMMIT_RESPONSE"
             exit 1
           fi
           
-          echo "✅ Commit جدید: $NEW_COMMIT_SHA"
+          echo "✅ Commit: $NEW_COMMIT_SHA"
           
-          # جایگزینی شاخه main
-          echo "🚀 جایگزینی شاخه main..."
+          # به‌روزرسانی شاخه main
+          echo "🚀 به‌روزرسانی شاخه main..."
           curl -s -X PATCH -H "Authorization: token $GITHUB_TOKEN" \
-            -d "{\"sha\":\"$NEW_COMMIT_SHA\",\"force\":true}" \
+            -d "{\"sha\":\"$NEW_COMMIT_SHA\",\"force\":false}" \
             "https://api.github.com/repos/${{ github.repository }}/git/refs/heads/main"
           
-          echo "🎉 تاریخچه برای همیشه پاک شد!"
+          echo "🎉 پوشه downloads با موفقیت حذف شد!"
