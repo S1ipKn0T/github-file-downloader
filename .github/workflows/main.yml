@@ -1,4 +1,4 @@
-name: دانلود و آپلود مستقیم به گوگل درایو (بدون فشرده‌سازی)
+name: دانلود و آپلود موازی به گوگل درایو (بدون فشرده‌سازی)
 
 on:
   workflow_dispatch:
@@ -27,7 +27,7 @@ jobs:
     steps:
       - name: نصب پیش‌نیازها
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq curl
+          sudo apt-get update -qq && sudo apt-get install -y -qq curl parallel
           curl https://rclone.org/install.sh | sudo bash
 
       - name: تنظیم کانفیگ Rclone
@@ -47,74 +47,93 @@ jobs:
           echo "MAIN_FOLDER=$MAIN_FOLDER" >> $GITHUB_ENV
           echo "📁 پوشه مقصد در گوگل درایو: $MAIN_FOLDER"
 
-      - name: دانلود و آپلود مستقیم
+      - name: استخراج و نام‌گذاری یکتا
         run: |
           IFS="${{ github.event.inputs.delimiter }}" read -ra urls <<< "${{ github.event.inputs.file_urls }}"
-          success=0
-          fail=0
-          file_index=0
           
+          # حذف لینک‌های خالی و ساخت لیست
+          > url_list.txt
+          file_index=0
           for url in "${urls[@]}"; do
             url=$(echo "$url" | xargs)
             [ -z "$url" ] && continue
             file_index=$((file_index + 1))
             
-            echo ""
-            echo "═════════════════════════════════════════════"
-            echo "📥 [$file_index] پردازش..."
-            
             # استخراج نام فایل از URL
-            FILENAME=$(basename "$url" | cut -d '?' -f1)
-            # اگر نام فایل معنی‌دار نبود، یک نام پیش‌فرض بگذار
-            if [ -z "$FILENAME" ] || [ ${#FILENAME} -lt 3 ]; then
-              FILENAME="file_$(printf '%02d' $file_index)"
-            fi
-            # جایگزینی کاراکترهای غیرمجاز
+            FILENAME=$(basename "$url" | cut -d '?' -f1 | python3 -c "import sys, urllib.parse; print(urllib.parse.unquote(sys.stdin.read().strip()))" 2>/dev/null || basename "$url" | cut -d '?' -f1)
+            [ -z "$FILENAME" ] && FILENAME="file_$(printf '%02d' $file_index)"
             FILENAME=$(echo "$FILENAME" | sed 's/[^a-zA-Z0-9._-]/_/g')
             
-            echo "📄 نام فایل: $FILENAME"
-            
-            # دانلود فایل
-            echo "⬇️ دانلود..."
-            if curl -L --fail --retry 3 --retry-delay 3 \
-                 --connect-timeout 20 --max-time 600 \
-                 -o "${{ env.MAIN_FOLDER }}/$FILENAME" \
-                 "$url" 2>/dev/null; then
-              
-              FILE_SIZE=$(stat -c%s "${{ env.MAIN_FOLDER }}/$FILENAME")
-              echo "✅ دانلود موفق: $(numfmt --to=iec $FILE_SIZE)"
-              
-              # آپلود مستقیم به گوگل درایو
-              echo "🚀 آپلود به گوگل درایو..."
-              rclone copy "${{ env.MAIN_FOLDER }}/$FILENAME" \
-                "gdrive:/${{ env.MAIN_FOLDER }}/" \
-                --progress \
-                --verbose
-              
-              if [ $? -eq 0 ]; then
-                echo "✅ $FILENAME با موفقیت آپلود شد!"
-                rm -f "${{ env.MAIN_FOLDER }}/$FILENAME"
-                success=$((success + 1))
-              else
-                echo "❌ خطا در آپلود $FILENAME"
-                fail=$((fail + 1))
-              fi
-            else
-              echo "❌ دانلود ناموفق"
-              fail=$((fail + 1))
-            fi
+            echo "$url|$FILENAME" >> url_list.txt
           done
           
-          echo ""
-          echo "═════════════════════════════════════════════"
-          echo "📊 آمار نهایی"
-          echo "   کل لینک‌ها: $file_index"
-          echo "   ✅ موفق: $success"
-          echo "   ❌ ناموفق: $fail"
+          # رفع نام‌های تکراری
+          awk -F'|' '
+          {
+            name = $2
+            if (count[name] > 0) {
+              # جدا کردن نام و پسوند
+              if (match(name, /\.[a-zA-Z0-9]+$/)) {
+                base = substr(name, 1, RSTART-1)
+                ext = substr(name, RSTART)
+              } else {
+                base = name
+                ext = ""
+              }
+              $2 = base "-" count[name] ext
+            }
+            count[name]++
+            print $1 "|" $2
+          }' url_list.txt > url_list_final.txt
           
-          if [ "$success" -eq 0 ]; then
-            echo "❌ هیچ فایلی با موفقیت آپلود نشد!"
-            exit 1
-          fi
+          echo "📊 تعداد لینک‌های معتبر: $(wc -l < url_list_final.txt)"
+          cat url_list_final.txt
+
+      - name: دانلود و آپلود همزمان
+        run: |
+          echo "🚀 شروع دانلود و آپلود موازی..."
           
-          echo "🎉 تمام فایل‌ها با موفقیت به گوگل درایو منتقل شدند!"
+          FIFO="/tmp/upload_fifo"
+          mkfifo "$FIFO"
+          
+          # پراسس آپلود (در پس‌زمینه)
+          (
+            while IFS='|' read -r filepath filename; do
+              [ -f "$filepath" ] || continue
+              echo "📤 آپلود: $filename"
+              rclone copy "$filepath" "gdrive:/${{ env.MAIN_FOLDER }}/" \
+                --progress \
+                --transfers 4 \
+                --checkers 8 \
+                --buffer-size 64M \
+                --no-traverse
+              if [ $? -eq 0 ]; then
+                echo "✅ $filename"
+                rm -f "$filepath"
+              else
+                echo "❌ $filename"
+              fi
+            done < "$FIFO"
+          ) &
+          UPLOAD_PID=$!
+          
+          # پراسس دانلود (اصلی)
+          while IFS='|' read -r url filename; do
+            filepath="${{ env.MAIN_FOLDER }}/$filename"
+            echo "⬇️ $filename"
+            if curl -L --fail --retry 2 --retry-delay 2 \
+                 --connect-timeout 10 --max-time 300 \
+                 -o "$filepath" \
+                 "$url" 2>/dev/null; then
+              echo "$filepath|$filename" > "$FIFO"
+            else
+              echo "❌ دانلود: $filename"
+            fi
+          done < url_list_final.txt
+          
+          # سیگنال پایان به آپلودر
+          sleep 5
+          kill $UPLOAD_PID 2>/dev/null
+          rm -f "$FIFO"
+          
+          echo "🎉 عملیات به پایان رسید!"
