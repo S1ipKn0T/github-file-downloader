@@ -1,14 +1,10 @@
-name: دانلود و Push (نسخه بهینه Git)
+name: دانلود و آپلود مستقیم به گوگل درایو (بدون فشرده‌سازی)
 
 on:
   workflow_dispatch:
     inputs:
       file_urls:
         description: 'لینک‌ها با جداکننده ;'
-        required: true
-        type: string
-      zip_password:
-        description: 'رمز عبور فایل‌های ZIP'
         required: true
         type: string
       custom_folder:
@@ -23,16 +19,23 @@ on:
         default: ';'
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  download-and-push:
+  download-and-upload:
     runs-on: ubuntu-latest
     steps:
       - name: نصب پیش‌نیازها
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq p7zip-full
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq curl
+          curl https://rclone.org/install.sh | sudo bash
 
-      - name: ایجاد پوشه
+      - name: تنظیم کانفیگ Rclone
+        run: |
+          mkdir -p ~/.config/rclone/
+          echo "${{ secrets.RCLONE_CONFIG_BASE64 }}" | base64 -d > ~/.config/rclone/rclone.conf
+
+      - name: ایجاد پوشه موقت
         run: |
           if [ -n "${{ github.event.inputs.custom_folder }}" ]; then
             MAIN_FOLDER="downloads/${{ github.event.inputs.custom_folder }}"
@@ -42,51 +45,76 @@ jobs:
           fi
           mkdir -p "$MAIN_FOLDER"
           echo "MAIN_FOLDER=$MAIN_FOLDER" >> $GITHUB_ENV
-          echo "📁 پوشه: $MAIN_FOLDER"
+          echo "📁 پوشه مقصد در گوگل درایو: $MAIN_FOLDER"
 
-      - name: دانلود و پردازش (سریع)
+      - name: دانلود و آپلود مستقیم
         run: |
           IFS="${{ github.event.inputs.delimiter }}" read -ra urls <<< "${{ github.event.inputs.file_urls }}"
-          success=0; fail=0; file_index=0
+          success=0
+          fail=0
+          file_index=0
           
           for url in "${urls[@]}"; do
-            url=$(echo "$url" | xargs); [ -z "$url" ] && continue
+            url=$(echo "$url" | xargs)
+            [ -z "$url" ] && continue
             file_index=$((file_index + 1))
             
-            echo "📥 [$file_index] دانلود..."
-            ARCHIVE_NAME=$(printf "file_%02d" $file_index)
+            echo ""
+            echo "═════════════════════════════════════════════"
+            echo "📥 [$file_index] پردازش..."
             
-            curl -L --fail --retry 3 --retry-delay 3 \
+            # استخراج نام فایل از URL
+            FILENAME=$(basename "$url" | cut -d '?' -f1)
+            # اگر نام فایل معنی‌دار نبود، یک نام پیش‌فرض بگذار
+            if [ -z "$FILENAME" ] || [ ${#FILENAME} -lt 3 ]; then
+              FILENAME="file_$(printf '%02d' $file_index)"
+            fi
+            # جایگزینی کاراکترهای غیرمجاز
+            FILENAME=$(echo "$FILENAME" | sed 's/[^a-zA-Z0-9._-]/_/g')
+            
+            echo "📄 نام فایل: $FILENAME"
+            
+            # دانلود فایل
+            echo "⬇️ دانلود..."
+            if curl -L --fail --retry 3 --retry-delay 3 \
                  --connect-timeout 20 --max-time 600 \
-                 -o "${{ env.MAIN_FOLDER }}/temp_dl" \
-                 "$url" 2>/dev/null && \
-            7z a -p"${{ github.event.inputs.zip_password }}" -mhe=on -mx=0 -v40m \
-                 "${{ env.MAIN_FOLDER }}/${ARCHIVE_NAME}.7z" "${{ env.MAIN_FOLDER }}/temp_dl" > /dev/null 2>&1 && \
-            rm -f "${{ env.MAIN_FOLDER }}/temp_dl" && \
-            echo "✅ ${ARCHIVE_NAME}.7z" && success=$((success + 1)) || \
-            { echo "❌ خطا"; fail=$((fail + 1)); }
+                 -o "${{ env.MAIN_FOLDER }}/$FILENAME" \
+                 "$url" 2>/dev/null; then
+              
+              FILE_SIZE=$(stat -c%s "${{ env.MAIN_FOLDER }}/$FILENAME")
+              echo "✅ دانلود موفق: $(numfmt --to=iec $FILE_SIZE)"
+              
+              # آپلود مستقیم به گوگل درایو
+              echo "🚀 آپلود به گوگل درایو..."
+              rclone copy "${{ env.MAIN_FOLDER }}/$FILENAME" \
+                "gdrive:/${{ env.MAIN_FOLDER }}/" \
+                --progress \
+                --verbose
+              
+              if [ $? -eq 0 ]; then
+                echo "✅ $FILENAME با موفقیت آپلود شد!"
+                rm -f "${{ env.MAIN_FOLDER }}/$FILENAME"
+                success=$((success + 1))
+              else
+                echo "❌ خطا در آپلود $FILENAME"
+                fail=$((fail + 1))
+              fi
+            else
+              echo "❌ دانلود ناموفق"
+              fail=$((fail + 1))
+            fi
           done
           
-          echo "📊 موفق: $success | ناموفق: $fail"
-          [ "$success" -eq 0 ] && exit 1 || true
-
-      - name: Clone سبک و Push
-        run: |
-          echo "🚀 در حال clone و push..."
-          git clone --depth=1 --filter=blob:none https://x-access-token:${{ github.token }}@github.com/${{ github.repository }} repo-tmp
-          cd repo-tmp
+          echo ""
+          echo "═════════════════════════════════════════════"
+          echo "📊 آمار نهایی"
+          echo "   کل لینک‌ها: $file_index"
+          echo "   ✅ موفق: $success"
+          echo "   ❌ ناموفق: $fail"
           
-          mkdir -p "${{ env.MAIN_FOLDER }}"
-          cp ../${{ env.MAIN_FOLDER }}/*.7z.* "${{ env.MAIN_FOLDER }}/"
+          if [ "$success" -eq 0 ]; then
+            echo "❌ هیچ فایلی با موفقیت آپلود نشد!"
+            exit 1
+          fi
           
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add "${{ env.MAIN_FOLDER }}/"
-          git commit -m "📦 [${{ env.MAIN_FOLDER }}]"
-          
-          for i in {1..5}; do
-            git pull --rebase origin main && git push origin main && echo "🎉 آپلود تموم شد!" && exit 0
-            echo "⚠️ تلاش $i نشد - ۵ ثانیه صبر"
-            sleep 5
-          done
-          echo "❌ آپلود失败"; exit 1
+          echo "🎉 تمام فایل‌ها با موفقیت به گوگل درایو منتقل شدند!"
