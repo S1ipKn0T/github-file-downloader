@@ -63,36 +63,44 @@ jobs:
             echo "═════════════════════════════════════════════"
             echo "📥 [$file_index] پردازش..."
             
+            # --- >>> شروع تغییرات <<< ---
+            # استخراج نام پوشه والد از URL برای یکتاسازی نام فایل
+            FOLDER_NAME=$(echo "$url" | rev | cut -d'/' -f2 | rev)
+            
             # استخراج نام فایل از URL
             FILENAME=$(basename "$url" | cut -d '?' -f1 | python3 -c "import sys, urllib.parse; print(urllib.parse.unquote(sys.stdin.read().strip()))" 2>/dev/null || basename "$url" | cut -d '?' -f1)
             [ -z "$FILENAME" ] && FILENAME="file_$(printf '%02d' $file_index)"
             FILENAME=$(echo "$FILENAME" | sed 's/[^a-zA-Z0-9._-]/_/g')
             
-            echo "📄 نام فایل: $FILENAME"
+            # ترکیب نام پوشه و نام فایل برای ساختن یک نام یکتا
+            UNIQUE_FILENAME="${FOLDER_NAME}_${FILENAME}"
+            # --- >>> پایان تغییرات <<< ---
+            
+            echo "📄 نام فایل: $UNIQUE_FILENAME"
             
             # دانلود فایل
             echo "⬇️ دانلود..."
             if curl -L --fail --retry 2 --retry-delay 2 \
                  --connect-timeout 10 --max-time 300 \
-                 -o "${{ env.MAIN_FOLDER }}/$FILENAME" \
+                 -o "${{ env.MAIN_FOLDER }}/$UNIQUE_FILENAME" \
                  "$url" 2>/dev/null; then
               
-              FILE_SIZE=$(stat -c%s "${{ env.MAIN_FOLDER }}/$FILENAME")
+              FILE_SIZE=$(stat -c%s "${{ env.MAIN_FOLDER }}/$UNIQUE_FILENAME")
               echo "✅ دانلود موفق: $(numfmt --to=iec $FILE_SIZE)"
               
               # آپلود مستقیم به گوگل درایو
               echo "🚀 آپلود به گوگل درایو..."
-              if rclone copy "${{ env.MAIN_FOLDER }}/$FILENAME" \
+              if rclone copy "${{ env.MAIN_FOLDER }}/$UNIQUE_FILENAME" \
                 "gdrive:/${{ env.MAIN_FOLDER }}/" \
                 --progress \
                 --transfers 4 \
                 --buffer-size 64M; then
                 
-                echo "✅ $FILENAME با موفقیت آپلود شد!"
-                rm -f "${{ env.MAIN_FOLDER }}/$FILENAME"
+                echo "✅ $UNIQUE_FILENAME با موفقیت آپلود شد!"
+                rm -f "${{ env.MAIN_FOLDER }}/$UNIQUE_FILENAME"
                 success=$((success + 1))
               else
-                echo "❌ خطا در آپلود $FILENAME"
+                echo "❌ خطا در آپلود $UNIQUE_FILENAME"
                 fail=$((fail + 1))
               fi
             else
