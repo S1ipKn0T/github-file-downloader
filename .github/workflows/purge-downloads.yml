@@ -1,4 +1,4 @@
-name: حذف کامل پوشه downloads و پاکسازی تاریخچه
+name: حذف قطعی پوشه downloads
 
 on:
   workflow_dispatch:
@@ -7,66 +7,60 @@ permissions:
   contents: write
 
 jobs:
-  purge-downloads:
+  delete-downloads:
     runs-on: ubuntu-latest
     steps:
-      - name: حذف تمام فایل‌های پوشه downloads با API
+      - name: حذف بازگشتی تمام محتویات downloads
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "🔍 دریافت ساختار فایل‌ها..."
+          echo "🔍 شروع حذف بازگشتی..."
+
+          # تابع حذف یک مسیر
+          delete_path() {
+            local path="$1"
+            echo "📁 بررسی: $path"
+            
+            # دریافت اطلاعات مسیر
+            local response=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+              "https://api.github.com/repos/${{ github.repository }}/contents/$path?ref=main")
+            
+            # اگر آرایه است (پوشه)
+            if echo "$response" | jq -e 'type == "array"' > /dev/null 2>&1; then
+              echo "📂 پوشه: $path (حاوی $(echo "$response" | jq 'length') آیتم)"
+              echo "$response" | jq -c '.[]' | while IFS= read -r item; do
+                sub_path=$(echo "$item" | jq -r '.path')
+                item_type=$(echo "$item" | jq -r '.type')
+                if [ "$item_type" = "dir" ]; then
+                  delete_path "$sub_path"
+                else
+                  delete_file "$sub_path"
+                fi
+              done
+            else
+              # یک فایل است
+              delete_file "$path"
+            fi
+          }
+
+          # تابع حذف یک فایل
+          delete_file() {
+            local file_path="$1"
+            local file_sha=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+              "https://api.github.com/repos/${{ github.repository }}/contents/$file_path?ref=main" | jq -r '.sha')
+            
+            if [ -n "$file_sha" ] && [ "$file_sha" != "null" ]; then
+              echo "🗑️ حذف: $file_path"
+              curl -s -X DELETE -H "Authorization: token $GITHUB_TOKEN" \
+                -d "{\"message\":\"حذف $file_path\",\"sha\":\"$file_sha\",\"branch\":\"main\"}" \
+                "https://api.github.com/repos/${{ github.repository }}/contents/$file_path" > /dev/null
+              echo "✅"
+            else
+              echo "⚠️ یافت نشد: $file_path"
+            fi
+          }
+
+          # شروع از پوشه downloads
+          delete_path "downloads"
           
-          MAIN_SHA=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
-            "https://api.github.com/repos/${{ github.repository }}/git/ref/heads/main" | jq -r '.object.sha')
-          
-          TREE_SHA=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
-            "https://api.github.com/repos/${{ github.repository }}/git/commits/$MAIN_SHA" | jq -r '.tree.sha')
-          
-          # دریافت لیست فایل‌ها
-          TREE_CONTENT=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
-            "https://api.github.com/repos/${{ github.repository }}/git/trees/$TREE_SHA?recursive=1")
-          
-          # فیلتر کردن فایل‌هایی که در downloads/ نیستند
-          FILTERED_TREE=$(echo "$TREE_CONTENT" | jq '[ .tree[] | select(.path | startswith("downloads/") | not) ]')
-          
-          echo "تعداد فایل‌های باقی‌مانده: $(echo "$FILTERED_TREE" | jq 'length')"
-          
-          # ساختن tree جدید
-          NEW_TREE_ITEMS=$(echo "$FILTERED_TREE" | jq '[.[] | {path: .path, mode: .mode, type: .type, sha: .sha}]')
-          
-          echo "🌱 ساخت tree جدید..."
-          NEW_TREE_RESPONSE=$(curl -s -X POST -H "Authorization: token $GITHUB_TOKEN" \
-            -d "{\"tree\":$NEW_TREE_ITEMS}" \
-            "https://api.github.com/repos/${{ github.repository }}/git/trees")
-          
-          NEW_TREE_SHA=$(echo "$NEW_TREE_RESPONSE" | jq -r '.sha')
-          
-          if [ "$NEW_TREE_SHA" = "null" ] || [ -z "$NEW_TREE_SHA" ]; then
-            echo "❌ خطا: $NEW_TREE_RESPONSE"
-            exit 1
-          fi
-          
-          echo "✅ Tree جدید: $NEW_TREE_SHA"
-          
-          # ساختن commit با parent (نه یتیم)
-          echo "📝 ساخت commit..."
-          NEW_COMMIT_RESPONSE=$(curl -s -X POST -H "Authorization: token $GITHUB_TOKEN" \
-            -d "{\"message\":\"🗑️ حذف کامل پوشه downloads\",\"tree\":\"$NEW_TREE_SHA\",\"parents\":[\"$MAIN_SHA\"]}" \
-            "https://api.github.com/repos/${{ github.repository }}/git/commits")
-          
-          NEW_COMMIT_SHA=$(echo "$NEW_COMMIT_RESPONSE" | jq -r '.sha')
-          
-          if [ "$NEW_COMMIT_SHA" = "null" ] || [ -z "$NEW_COMMIT_SHA" ]; then
-            echo "❌ خطا: $NEW_COMMIT_RESPONSE"
-            exit 1
-          fi
-          
-          echo "✅ Commit: $NEW_COMMIT_SHA"
-          
-          # به‌روزرسانی شاخه main
-          echo "🚀 به‌روزرسانی شاخه main..."
-          curl -s -X PATCH -H "Authorization: token $GITHUB_TOKEN" \
-            -d "{\"sha\":\"$NEW_COMMIT_SHA\",\"force\":false}" \
-            "https://api.github.com/repos/${{ github.repository }}/git/refs/heads/main"
-          
-          echo "🎉 پوشه downloads با موفقیت حذف شد!"
+          echo "🎉 عملیات حذف به پایان رسید!"
