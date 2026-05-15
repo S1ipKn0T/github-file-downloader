@@ -33,7 +33,7 @@ jobs:
 
       - name: Setup Rclone
         env:
-          RCLONE_CONFIG_BASE64: ${{ secrets.RCLONE_CONFIG_BASE64 }}
+          RCLONE_CONFIG_BASE64: ${{ secrets.RCLONE_CONFIG_BASE64_1 }}
         run: |
           mkdir -p ~/.config/rclone
           echo "$RCLONE_CONFIG_BASE64" | base64 -d > ~/.config/rclone/rclone.conf
