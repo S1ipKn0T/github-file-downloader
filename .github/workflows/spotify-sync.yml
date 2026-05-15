@@ -1,51 +1,50 @@
-name: Spotify to Google Drive Sync
+name: Download Tracks and Upload to GDrive
 
 on:
+  workflow_dispatch:   # Manual trigger
   schedule:
-    - cron: '0 2 * * *'  # Daily at 2 AM
-  workflow_dispatch:      # Manual trigger button
+    - cron: '0 3 * * 0'  # Optional: every Sunday at 3 AM
 
 jobs:
-  sync:
+  download-and-upload:
     runs-on: ubuntu-latest
-    
     steps:
-      - name: Checkout repository
+      - name: Checkout repo (to get tracks.txt)
         uses: actions/checkout@v4
-      
-      - name: Install FFmpeg
+
+      - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
-      
-      - name: Install spotDL
-        run: pip install spotdl
-      
-      - name: Download Spotify Playlist
-        env:
-          SPOTIFY_CLIENT_ID: ${{ secrets.SPOTIFY_CLIENT_ID }}
-          SPOTIFY_CLIENT_SECRET: ${{ secrets.SPOTIFY_CLIENT_SECRET }}
+          sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
+          sudo chmod a+rx /usr/local/bin/yt-dlp
+
+      - name: Download tracks from YouTube
         run: |
-          spotdl download ${{ secrets.SPOTIFY_PLAYLIST_URL }} \
-            --client-id $SPOTIFY_CLIENT_ID \
-            --client-secret $SPOTIFY_CLIENT_SECRET \
-            --output ./downloads \
-            --audio piped
-      
+          mkdir -p downloads
+          while IFS= read -r line; do
+            # Skip empty lines
+            [[ -z "$line" ]] && continue
+            echo "Downloading: $line"
+            yt-dlp -x --audio-format mp3 \
+              -o "downloads/%(title)s.%(ext)s" \
+              "ytsearch:$line"
+          done < tracks.txt
+
       - name: Setup Rclone
         env:
-          RCLONE_CONFIG_BASE64_1: ${{ secrets.RCLONE_CONFIG_BASE64_1 }}
+          RCLONE_CONFIG_BASE64: ${{ secrets.RCLONE_CONFIG_BASE64 }}
         run: |
           mkdir -p ~/.config/rclone
-          echo "$RCLONE_CONFIG_BASE64_1" | base64 -d > ~/.config/rclone/rclone.conf
-      
+          echo "$RCLONE_CONFIG_BASE64" | base64 -d > ~/.config/rclone/rclone.conf
+
       - name: Upload to Google Drive
         run: |
           rclone copy ./downloads gdrive:Spotify-Music --progress --create-empty-src-dirs
-      
-      - name: Keep workflow artifacts (optional)
+
+      - name: Upload artifacts (backup)
         uses: actions/upload-artifact@v4
         with:
-          name: spotify-downloads
+          name: downloaded-tracks
           path: ./downloads/
           retention-days: 7
