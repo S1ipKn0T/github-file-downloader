@@ -2,8 +2,8 @@ name: Spotify to Google Drive Sync
 
 on:
   schedule:
-    - cron: '0 2 * * *'  # Run daily at 2 AM
-  workflow_dispatch:      # Allow manual trigger
+    - cron: '0 2 * * *'  # Daily at 2 AM
+  workflow_dispatch:      # Manual trigger button
 
 jobs:
   sync:
@@ -14,7 +14,9 @@ jobs:
         uses: actions/checkout@v4
       
       - name: Install FFmpeg
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
       
       - name: Install spotDL
         run: pip install spotdl
@@ -27,25 +29,23 @@ jobs:
           spotdl download ${{ secrets.SPOTIFY_PLAYLIST_URL }} \
             --client-id $SPOTIFY_CLIENT_ID \
             --client-secret $SPOTIFY_CLIENT_SECRET \
-            --output ./downloads
+            --output ./downloads \
+            --audio piped
       
-      - name: Install Rclone
-        run: |
-          curl https://rclone.org/install.sh | sudo bash
-      
-      - name: Configure Rclone
+      - name: Setup Rclone
         env:
-          RCLONE_CONFIG: ${{ secrets.RCLONE_CONFIG }}
+          RCLONE_CONFIG_BASE64_1: ${{ secrets.RCLONE_CONFIG_BASE64_1 }}
         run: |
           mkdir -p ~/.config/rclone
-          echo "$RCLONE_CONFIG" > ~/.config/rclone/rclone.conf
+          echo "$RCLONE_CONFIG_BASE64_1" | base64 -d > ~/.config/rclone/rclone.conf
       
       - name: Upload to Google Drive
         run: |
-          rclone copy ./downloads gdrive:Spotify-Music --progress
+          rclone copy ./downloads gdrive:Spotify-Music --progress --create-empty-src-dirs
       
-      - name: Upload artifacts (backup)
+      - name: Keep workflow artifacts (optional)
         uses: actions/upload-artifact@v4
         with:
           name: spotify-downloads
-          path: ./downloads
+          path: ./downloads/
+          retention-days: 7
